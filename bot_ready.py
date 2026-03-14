@@ -1,151 +1,99 @@
 """
-🤖 SIMPLE AI BOT - Ready to Run!
-Uses Environment Variables for security
+🤖 AI Telegram Bot - Fixed for Render
 """
 
 import os
-
-# Get keys from environment variables (safer!)
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-
-# ============================================
-# DON'T CHANGE ANYTHING BELOW
-# ============================================
-
-import threading
-import time
-from datetime import datetime, timedelta
-from collections import defaultdict
-
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.constants import ChatAction
 import requests
-from duckduckgo_search import DDGS
-from fpdf import FPDF
+from datetime import datetime, timedelta
 
-# Memory
-chats = {}
-reminders_data = {}
+# Get keys from environment
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
 
-# ============================================
-# AI FUNCTION
-# ============================================
+# Simple memory
+history = {}
 
-def ask_ai(message, history=[]):
+def ask_ai(message, user_id):
     """Ask Groq AI"""
-    messages = [{"role": "system", "content": "You are a helpful AI assistant."}] + history + [{"role": "user", "content": message}]
+    if user_id not in history:
+        history[user_id] = []
+    
+    history[user_id].append({"role": "user", "content": message})
     
     try:
         r = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Authorization": f"Bearer {GROQ_KEY}",
                 "Content-Type": "application/json"
             },
             json={
                 "model": "llama-3.1-8b-instant",
-                "messages": messages,
-                "temperature": 0.7,
-                "max_tokens": 4096
+                "messages": [{"role": "system", "content": "You are helpful."}] + history[user_id][-10:],
+                "max_tokens": 2000
             },
-            timeout=60
+            timeout=30
         )
         if r.status_code == 200:
-            return r.json()['choices'][0]['message']['content']
-        else:
-            return f"API Error: {r.status_code}"
+            reply = r.json()['choices'][0]['message']['content']
+            history[user_id].append({"role": "assistant", "content": reply})
+            return reply
+        return f"API Error: {r.status_code}"
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error: {e}"
 
-# ============================================
-# HELPER FUNCTIONS  
-# ============================================
+# ===== TELEGRAM BOT =====
+import asyncio
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.request import HTTPXRequest
 
-def search_web(query):
-    results = []
-    try:
-        with DDGS() as ddgs:
-            for r in ddgs.text(query, max_results=5):
-                results.append(f"📌 {r['title']}\n{r['body'][:150]}...\n🔗 {r['href']}\n")
-    except:
-        pass
-    return f"🔍 Results: {query}\n\n" + "\n".join(results) if results else "No results"
+async def start(update: Update, context):
+    await update.message.reply_text("""🤖 *AI Bot Online!*
 
-def make_pdf(text, title="Document"):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Helvetica", size=12)
-    pdf.cell(0, 10, title, ln=True, align="C")
-    pdf.ln(10)
-    pdf.multi_cell(0, 7, text.encode('latin-1', 'replace').decode('latin-1'))
-    filename = f"output_{datetime.now().strftime('%H%M%S')}.pdf"
-    pdf.output(filename)
-    return filename
+Just send a message to chat!
 
-# ============================================
-# TELEGRAM COMMANDS
-# ============================================
-
-async def start(update, context):
-    await update.message.reply_text("""
-🤖 *AI BOT READY!*
-
-*Commands:*
-- Just send message to chat!
-
+Commands:
 /research <topic> - Search web
-/pdf <text> - Make PDF
 /remind <time> <msg> - Set reminder
 /remind every 1h <msg> - Recurring
-/reminders - View all
+/reminders - View reminders
 /clear - Clear chat
-
-*Example:*
-/remind every 1h Eye compress!
 """, parse_mode="Markdown")
 
-async def chat(update, context):
+async def chat(update: Update, context):
     user_id = update.effective_user.id
     msg = update.message.text
-    
-    if user_id not in chats:
-        chats[user_id] = []
-    
-    chats[user_id].append({"role": "user", "content": msg})
-    
     await update.message.chat.send_action("typing")
-    reply = ask_ai(msg, chats[user_id])
-    
-    chats[user_id].append({"role": "assistant", "content": reply})
-    chats[user_id] = chats[user_id][-20:]
-    
+    reply = ask_ai(msg, user_id)
     if len(reply) > 4000:
         for i in range(0, len(reply), 4000):
             await update.message.reply_text(reply[i:i+4000])
     else:
         await update.message.reply_text(reply)
 
-async def research(update, context):
+async def research(update: Update, context):
     if not context.args:
         await update.message.reply_text("Usage: /research <topic>")
         return
+    
     query = " ".join(context.args)
     await update.message.chat.send_action("typing")
-    results = search_web(query)
-    await update.message.reply_text(results[:4000])
+    
+    try:
+        from duckduckgo_search import DDGS
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=5):
+                results.append(f"📌 {r['title']}\n{r['body'][:150]}...\n🔗 {r['href']}")
+        await update.message.reply_text(f"🔍 {query}\n\n" + "\n\n".join(results)[:4000])
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
 
-async def pdf_cmd(update, context):
-    if not context.args:
-        await update.message.reply_text("Usage: /pdf <your text>")
-        return
-    text = " ".join(context.args)
-    filename = make_pdf(text)
-    with open(filename, 'rb') as f:
-        await update.message.reply_document(f, caption="📄 Your PDF!")
+# Reminder storage
+reminders = {}
 
-async def remind(update, context):
+async def set_reminder(update: Update, context):
     if len(context.args) < 2:
         await update.message.reply_text("Usage:\n/remind 14:30 Message\n/remind every 1h Message")
         return
@@ -153,153 +101,130 @@ async def remind(update, context):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     
-    if user_id not in reminders_data:
-        reminders_data[user_id] = []
+    if user_id not in reminders:
+        reminders[user_id] = []
     
-    # Recurring reminder
+    # Recurring
     if context.args[0].lower() == "every":
         interval = context.args[1]
-        message = " ".join(context.args[2:])
+        msg = " ".join(context.args[2:])
         
-        if "h" in interval.lower():
-            mins = int(interval.lower().replace("h", "")) * 60
-        elif "m" in interval.lower():
-            mins = int(interval.lower().replace("m", ""))
+        if "h" in interval:
+            mins = int(interval.replace("h", "").replace("H", "")) * 60
+        elif "m" in interval:
+            mins = int(interval.replace("m", "").replace("M", ""))
         else:
-            mins = 60
+            mins = int(interval) * 60
         
-        reminder = {
+        reminders[user_id].append({
             "chat_id": chat_id,
-            "message": message,
+            "msg": msg,
             "recurring": True,
-            "interval_minutes": mins,
-            "next_time": datetime.now() + timedelta(minutes=mins)
-        }
-        reminders_data[user_id].append(reminder)
-        await update.message.reply_text(f"✅ *Recurring Reminder Set!*\n📝 {message}\n⏱ Every {mins} minutes", parse_mode="Markdown")
-        return
-    
-    # One-time reminder
-    time_str = context.args[0]
-    message = " ".join(context.args[1:])
-    
-    try:
-        hour, minute = map(int, time_str.split(":"))
-        now = datetime.now()
-        trigger = now.replace(hour=hour, minute=minute, second=0)
-        if trigger <= now:
-            trigger += timedelta(days=1)
-        
-        reminder = {
-            "chat_id": chat_id,
-            "message": message,
-            "trigger_time": trigger,
-            "recurring": False
-        }
-        reminders_data[user_id].append(reminder)
-        await update.message.reply_text(f"✅ *Reminder Set!*\n📝 {message}\n📅 {trigger.strftime('%Y-%m-%d %H:%M')}", parse_mode="Markdown")
-    except:
-        await update.message.reply_text("❌ Use format: 14:30")
+            "interval": mins,
+            "next": datetime.now() + timedelta(minutes=mins)
+        })
+        await update.message.reply_text(f"✅ Every {mins}min: {msg}")
+    else:
+        # One-time
+        time_str = context.args[0]
+        msg = " ".join(context.args[1:])
+        try:
+            h, m = map(int, time_str.split(":"))
+            now = datetime.now()
+            trigger = now.replace(hour=h, minute=m, second=0)
+            if trigger <= now:
+                trigger += timedelta(days=1)
+            reminders[user_id].append({
+                "chat_id": chat_id,
+                "msg": msg,
+                "trigger": trigger,
+                "recurring": False
+            })
+            await update.message.reply_text(f"✅ Set for {trigger.strftime('%m/%d %H:%M')}: {msg}")
+        except:
+            await update.message.reply_text("❌ Use format: 14:30")
 
-async def view_reminders(update, context):
+async def view_reminders(update: Update, context):
     user_id = update.effective_user.id
-    user_reminders = reminders_data.get(user_id, [])
+    user_reminders = reminders.get(user_id, [])
     
     if not user_reminders:
-        await update.message.reply_text("📭 No reminders yet!")
+        await update.message.reply_text("📭 No reminders")
         return
     
-    text = "⏰ *Your Reminders:*\n\n"
+    text = "⏰ Your Reminders:\n\n"
     for i, r in enumerate(user_reminders, 1):
-        if r.get("recurring"):
-            text += f"{i}. 🔄 Every {r['interval_minutes']}min\n   📝 {r['message']}\n\n"
+        if r["recurring"]:
+            text += f"{i}. 🔄 Every {r['interval']}min\n   {r['msg']}\n\n"
         else:
-            text += f"{i}. 📅 {r['trigger_time'].strftime('%m/%d %H:%M')}\n   📝 {r['message']}\n\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
+            text += f"{i}. 📅 {r['trigger'].strftime('%m/%d %H:%M')}\n   {r['msg']}\n\n"
+    await update.message.reply_text(text)
 
-async def clear(update, context):
-    chats[update.effective_user.id] = []
-    await update.message.reply_text("✅ Chat cleared!")
+async def clear(update: Update, context):
+    history[update.effective_user.id] = []
+    await update.message.reply_text("✅ Cleared!")
 
-# ============================================
-# REMINDER CHECKER (runs in background)
-# ============================================
-
+# Reminder checker
 async def check_reminders(app):
-    """Check and send reminders"""
-    now = datetime.now()
-    
-    for user_id, reminders in reminders_data.items():
-        for i, r in enumerate(reminders):
-            should_trigger = False
-            
-            if r.get("recurring"):
-                if now >= r["next_time"]:
-                    should_trigger = True
-                    reminders[i]["next_time"] = now + timedelta(minutes=r["interval_minutes"])
-            else:
-                if "trigger_time" in r and r["trigger_time"] and now >= r["trigger_time"]:
-                    should_trigger = True
-                    reminders[i]["trigger_time"] = None
-            
-            if should_trigger:
-                try:
-                    await app.bot.send_message(
-                        chat_id=r["chat_id"],
-                        text=f"⏰ *REMINDER!*\n\n{r['message']}",
-                        parse_mode="Markdown"
-                    )
-                except:
-                    pass
-
-def reminder_loop(app):
-    """Background thread for reminders"""
-    import asyncio
     while True:
-        try:
-            asyncio.run(check_reminders(app))
-        except:
-            pass
-        time.sleep(30)
+        now = datetime.now()
+        for user_id, user_reminders in reminders.items():
+            for i, r in enumerate(user_reminders):
+                trigger = False
+                if r["recurring"] and now >= r["next"]:
+                    trigger = True
+                    user_reminders[i]["next"] = now + timedelta(minutes=r["interval"])
+                elif not r["recurring"] and "trigger" in r and now >= r["trigger"]:
+                    trigger = True
+                    user_reminders[i]["trigger"] = None
+                
+                if trigger:
+                    try:
+                        await app.bot.send_message(r["chat_id"], f"⏰ REMINDER!\n\n{r['msg']}")
+                    except:
+                        pass
+        await asyncio.sleep(30)
 
-# ============================================
-# MAIN
-# ============================================
-
-if __name__ == "__main__":
-    # Check if keys exist
-    if not TELEGRAM_TOKEN:
-        print("❌ ERROR: TELEGRAM_BOT_TOKEN not set!")
-        print("Set it as environment variable")
-        exit(1)
-    if not GROQ_API_KEY:
-        print("❌ ERROR: GROQ_API_KEY not set!")
-        print("Set it as environment variable")
-        exit(1)
+def main():
+    if not TOKEN:
+        print("❌ TELEGRAM_BOT_TOKEN not set!")
+        return
+    if not GROQ_KEY:
+        print("❌ GROQ_API_KEY not set!")
+        return
     
     print("=" * 40)
-    print("🤖 AI BOT STARTING...")
+    print("🤖 Bot Starting...")
     print("=" * 40)
     
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    # Create application with custom request
+    request = HTTPXRequest(connect_timeout=30, read_timeout=30)
+    app = Application.builder().token(TOKEN).request(request).build()
     
-    # Add commands
+    # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("research", research))
-    app.add_handler(CommandHandler("pdf", pdf_cmd))
-    app.add_handler(CommandHandler("remind", remind))
+    app.add_handler(CommandHandler("remind", set_reminder))
     app.add_handler(CommandHandler("reminders", view_reminders))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
     
-    # Start reminder checker
-    reminder_thread = threading.Thread(target=reminder_loop, args=(app,), daemon=True)
-    reminder_thread.start()
+    # Start reminder checker in background
+    import threading
+    def run_checker():
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(check_reminders(app))
     
-    print("✅ Bot is running!")
-    print("📱 Go to Telegram and message your bot")
+    checker_thread = threading.Thread(target=run_checker, daemon=True)
+    checker_thread.start()
+    
+    print("✅ Bot Running!")
     print("=" * 40)
     
-    app.run_polling()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
