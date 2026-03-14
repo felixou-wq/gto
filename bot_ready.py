@@ -1,8 +1,9 @@
 """
-🤖 AI Telegram Bot - Fixed for Render
+🤖 AI Telegram Bot - Fully Fixed for Render
 """
 
 import os
+import sys
 import requests
 from datetime import datetime, timedelta
 
@@ -10,23 +11,17 @@ from datetime import datetime, timedelta
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
 
-# Simple memory
+# Memory
 history = {}
 
 def ask_ai(message, user_id):
-    """Ask Groq AI"""
     if user_id not in history:
         history[user_id] = []
-    
     history[user_id].append({"role": "user", "content": message})
-    
     try:
         r = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_KEY}",
-                "Content-Type": "application/json"
-            },
+            headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
             json={
                 "model": "llama-3.1-8b-instant",
                 "messages": [{"role": "system", "content": "You are helpful."}] + history[user_id][-10:],
@@ -42,20 +37,20 @@ def ask_ai(message, user_id):
     except Exception as e:
         return f"Error: {e}"
 
+# Reminders storage
+reminders = {}
+
 # ===== TELEGRAM BOT =====
-import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
-from telegram.request import HTTPXRequest
 
 async def start(update: Update, context):
     await update.message.reply_text("""🤖 *AI Bot Online!*
 
-Just send a message to chat!
+Just message me to chat!
 
-Commands:
 /research <topic> - Search web
-/remind <time> <msg> - Set reminder
+/remind <time> <msg> - Set reminder  
 /remind every 1h <msg> - Recurring
 /reminders - View reminders
 /clear - Clear chat
@@ -76,10 +71,8 @@ async def research(update: Update, context):
     if not context.args:
         await update.message.reply_text("Usage: /research <topic>")
         return
-    
     query = " ".join(context.args)
     await update.message.chat.send_action("typing")
-    
     try:
         from duckduckgo_search import DDGS
         results = []
@@ -89,9 +82,6 @@ async def research(update: Update, context):
         await update.message.reply_text(f"🔍 {query}\n\n" + "\n\n".join(results)[:4000])
     except Exception as e:
         await update.message.reply_text(f"Error: {e}")
-
-# Reminder storage
-reminders = {}
 
 async def set_reminder(update: Update, context):
     if len(context.args) < 2:
@@ -104,28 +94,21 @@ async def set_reminder(update: Update, context):
     if user_id not in reminders:
         reminders[user_id] = []
     
-    # Recurring
     if context.args[0].lower() == "every":
         interval = context.args[1]
         msg = " ".join(context.args[2:])
-        
-        if "h" in interval:
-            mins = int(interval.replace("h", "").replace("H", "")) * 60
-        elif "m" in interval:
-            mins = int(interval.replace("m", "").replace("M", ""))
+        if "h" in interval.lower():
+            mins = int(interval.lower().replace("h", "")) * 60
+        elif "m" in interval.lower():
+            mins = int(interval.lower().replace("m", ""))
         else:
             mins = int(interval) * 60
-        
         reminders[user_id].append({
-            "chat_id": chat_id,
-            "msg": msg,
-            "recurring": True,
-            "interval": mins,
-            "next": datetime.now() + timedelta(minutes=mins)
+            "chat_id": chat_id, "msg": msg, "recurring": True,
+            "interval": mins, "next": datetime.now() + timedelta(minutes=mins)
         })
         await update.message.reply_text(f"✅ Every {mins}min: {msg}")
     else:
-        # One-time
         time_str = context.args[0]
         msg = " ".join(context.args[1:])
         try:
@@ -134,12 +117,7 @@ async def set_reminder(update: Update, context):
             trigger = now.replace(hour=h, minute=m, second=0)
             if trigger <= now:
                 trigger += timedelta(days=1)
-            reminders[user_id].append({
-                "chat_id": chat_id,
-                "msg": msg,
-                "trigger": trigger,
-                "recurring": False
-            })
+            reminders[user_id].append({"chat_id": chat_id, "msg": msg, "trigger": trigger, "recurring": False})
             await update.message.reply_text(f"✅ Set for {trigger.strftime('%m/%d %H:%M')}: {msg}")
         except:
             await update.message.reply_text("❌ Use format: 14:30")
@@ -147,11 +125,9 @@ async def set_reminder(update: Update, context):
 async def view_reminders(update: Update, context):
     user_id = update.effective_user.id
     user_reminders = reminders.get(user_id, [])
-    
     if not user_reminders:
         await update.message.reply_text("📭 No reminders")
         return
-    
     text = "⏰ Your Reminders:\n\n"
     for i, r in enumerate(user_reminders, 1):
         if r["recurring"]:
@@ -164,25 +140,30 @@ async def clear(update: Update, context):
     history[update.effective_user.id] = []
     await update.message.reply_text("✅ Cleared!")
 
-# Reminder checker
-async def check_reminders(app):
+# Background reminder checker
+import asyncio
+import threading
+
+async def check_reminders(bot):
     while True:
-        now = datetime.now()
-        for user_id, user_reminders in reminders.items():
-            for i, r in enumerate(user_reminders):
-                trigger = False
-                if r["recurring"] and now >= r["next"]:
-                    trigger = True
-                    user_reminders[i]["next"] = now + timedelta(minutes=r["interval"])
-                elif not r["recurring"] and "trigger" in r and now >= r["trigger"]:
-                    trigger = True
-                    user_reminders[i]["trigger"] = None
-                
-                if trigger:
-                    try:
-                        await app.bot.send_message(r["chat_id"], f"⏰ REMINDER!\n\n{r['msg']}")
-                    except:
-                        pass
+        try:
+            now = datetime.now()
+            for user_id, user_reminders in reminders.items():
+                for i, r in enumerate(user_reminders):
+                    should_trigger = False
+                    if r["recurring"] and now >= r["next"]:
+                        should_trigger = True
+                        user_reminders[i]["next"] = now + timedelta(minutes=r["interval"])
+                    elif not r["recurring"] and r.get("trigger") and now >= r["trigger"]:
+                        should_trigger = True
+                        user_reminders[i]["trigger"] = None
+                    if should_trigger:
+                        try:
+                            await bot.send_message(r["chat_id"], f"⏰ REMINDER!\n\n{r['msg']}")
+                        except:
+                            pass
+        except:
+            pass
         await asyncio.sleep(30)
 
 def main():
@@ -197,9 +178,8 @@ def main():
     print("🤖 Bot Starting...")
     print("=" * 40)
     
-    # Create application with custom request
-    request = HTTPXRequest(connect_timeout=30, read_timeout=30)
-    app = Application.builder().token(TOKEN).request(request).build()
+    # Build app
+    app = Application.builder().token(TOKEN).build()
     
     # Add handlers
     app.add_handler(CommandHandler("start", start))
@@ -210,20 +190,16 @@ def main():
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
     
-    # Start reminder checker in background
-    import threading
-    def run_checker():
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(check_reminders(app))
+    # Start reminder checker
+    async def post_init(application):
+        asyncio.create_task(check_reminders(application.bot))
     
-    checker_thread = threading.Thread(target=run_checker, daemon=True)
-    checker_thread.start()
+    app.post_init = post_init
     
     print("✅ Bot Running!")
     print("=" * 40)
     
+    # Run with proper event loop
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
